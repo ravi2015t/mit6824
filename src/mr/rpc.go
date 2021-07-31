@@ -29,7 +29,9 @@ type GetReduceCountReply struct {
 }
 
 type ReportTaskDoneArgs struct {
-	TaskId int
+	TaskId   int
+	TaskType TaskType
+	Workerid int
 }
 
 type ReportTaskDoneReply struct {

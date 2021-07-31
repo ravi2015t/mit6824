@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
+	"sort"
 )
 
 //
@@ -39,23 +41,38 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	nReduce := GetNReduce()
 
-	fmt.Printf("Num reduce %v", nReduce)
+	for {
 
-	task := GetTask()
-	mapTask(task, mapf, nReduce)
+		task := GetTask()
+
+		if task.TaskType == Map {
+			fmt.Printf("Got MAP task id %v  \n", task.TaskId)
+			mapTask(task, mapf, nReduce)
+			ReportTaskDone(task.TaskId, Map)
+		} else if task.TaskType == Reduce {
+			fmt.Printf("Got REDUCE task id %v \n", task.TaskId)
+			doReduce(reducef, task.TaskId)
+			ReportTaskDone(task.TaskId, Reduce)
+		} else {
+			return
+		}
+	}
 
 }
 
 func mapTask(task *RequestTaskReply, mapf func(string, string) []KeyValue, nReduce int) {
 	filename := task.File
 	file, err := os.Open(filename)
+
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
 	}
+
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
+
 	file.Close()
 	kva := mapf(filename, string(content))
 	writeMapToDisk(kva, task.TaskId, nReduce)
@@ -106,11 +123,74 @@ func writeMapToDisk(kva []KeyValue, mapID int, nReduce int) {
 	}
 }
 
+func doReduce(reducef func(string, []string) string, reduceId int) {
+	files, err := filepath.Glob(fmt.Sprintf("%v/mr-%v-%v", TempDir, "*", reduceId))
+	if err != nil {
+		log.Fatalf("Cannot list reduce files: %v \n", err)
+	}
+
+	kvMap := make(map[string][]string)
+	var kv KeyValue
+
+	for _, filePath := range files {
+		file, err := os.Open(filePath)
+		if err != nil {
+			log.Fatalf("Cannot open file: %v \n", filePath)
+		}
+
+		dec := json.NewDecoder(file)
+		for dec.More() {
+			err = dec.Decode(&kv)
+			if err != nil {
+				log.Fatalf("Cannot decode from file : %v \n", err)
+			}
+			kvMap[kv.Key] = append(kvMap[kv.Key], kv.Value)
+		}
+	}
+
+	writeReduceOutput(reducef, kvMap, reduceId)
+}
+
+func writeReduceOutput(reducef func(string, []string) string,
+	kvMap map[string][]string, reduceId int) {
+
+	// sort the kv map by key
+	keys := make([]string, 0, len(kvMap))
+	for k := range kvMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Create temp file
+	filePath := fmt.Sprintf("%v/mr-out-%v-%v", TempDir, reduceId, os.Getpid())
+	file, err := os.Create(filePath)
+	if err != nil {
+		log.Fatalf("Cannot create file %v\n", filePath)
+	}
+
+	// Call reduce and write to temp file
+	for _, k := range keys {
+		v := reducef(k, kvMap[k])
+		_, err := fmt.Fprintf(file, "%v %v\n", k, reducef(k, kvMap[k]))
+		if err != nil {
+			log.Fatalf("Cannot write mr output (%v, %v) to file", k, v)
+		}
+	}
+
+	// atomically rename temp files to ensure no one observes partial files
+	file.Close()
+	newPath := fmt.Sprintf("mr-out-%v", reduceId)
+	err = os.Rename(filePath, newPath)
+	if err != nil {
+		log.Fatalf("Cannot rename file %v\n", filePath)
+	}
+}
+
 //GetTask is used to get call the rpc GetTask of the coordinator
 func GetTask() *RequestTaskReply {
 	args := RequestTaskArgs{}
 	reply := RequestTaskReply{}
-	args.Workerid = 1
+	args.Workerid = os.Getpid()
 	call("Coordinator.GetTask", &args, &reply)
 	return &reply
 }
@@ -123,10 +203,13 @@ func GetNReduce() int {
 	return reply.ReduceCount
 }
 
-func ReportTaskDone() {
+func ReportTaskDone(taskId int, taskType TaskType) {
 	args := ReportTaskDoneArgs{}
+	args.TaskId = taskId
+	args.TaskType = taskType
+	args.Workerid = os.Getpid()
 	reply := ReportTaskDoneReply{}
-	call("Coordinator.ReportTaskStatus", &args, &reply)
+	call("Coordinator.ReportTaskDone", &args, &reply)
 }
 
 //

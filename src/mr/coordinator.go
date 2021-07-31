@@ -28,6 +28,7 @@ type TaskType int
 const (
 	Map TaskType = iota
 	Reduce
+	Exit
 )
 
 //Task has the status and type
@@ -36,6 +37,7 @@ type Task struct {
 	file     string
 	taskType TaskType
 	status   TaskStatus
+	workerId int
 }
 
 //Coordinator is responsible for assigning map and reduce tasks
@@ -44,6 +46,7 @@ type Coordinator struct {
 	nReduce     int
 	mapTasks    []Task
 	reduceTasks []Task
+	nMap        int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -62,17 +65,38 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 //GetTask is used to get a task from the co ordinator by workers
 func (c *Coordinator) GetTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	c.mu.Lock()
-	for _, task := range c.mapTasks {
-		if task.status == Notstarted {
-			reply.File = task.file
-			reply.TaskType = Map
-			reply.TaskId = task.id
-			task.status = Running
-			c.mu.Unlock()
-			go c.waitForTask(&task)
-			return nil
+
+	if c.nMap > 0 {
+		for i := range c.mapTasks {
+			if c.mapTasks[i].status == Notstarted {
+				fmt.Printf("Sending task id %v\n", c.mapTasks[i].id)
+				reply.File = c.mapTasks[i].file
+				reply.TaskType = Map
+				reply.TaskId = c.mapTasks[i].id
+				c.mapTasks[i].status = TaskStatus(Running)
+				c.mapTasks[i].workerId = args.Workerid
+				c.mu.Unlock()
+				go c.waitForTask(&c.mapTasks[i])
+				return nil
+			}
 		}
 	}
+	if c.nReduce > 0 {
+		for i := range c.reduceTasks {
+			if c.reduceTasks[i].status == Notstarted {
+				reply.TaskType = Reduce
+				reply.TaskId = c.reduceTasks[i].id
+				c.reduceTasks[i].status = TaskStatus(Running)
+				c.reduceTasks[i].workerId = args.Workerid
+				c.mu.Unlock()
+				go c.waitForTask(&c.reduceTasks[i])
+				return nil
+			}
+		}
+	}
+	reply.TaskId = -1
+	reply.TaskType = TaskType(Done)
+	c.mu.Unlock()
 	return nil
 }
 
@@ -80,23 +104,45 @@ func (c *Coordinator) GetTask(args *RequestTaskArgs, reply *RequestTaskReply) er
 func (c *Coordinator) GetNReduce(args *GetReduceCountArgs, reply *GetReduceCountReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	reply.ReduceCount = c.nReduce
+	reply.ReduceCount = len(c.reduceTasks)
 	return nil
 }
 
 //ReportTaskDone is used by workers to report that a task is done
 func (c *Coordinator) ReportTaskDone(args *ReportTaskDoneArgs, reply *ReportTaskDoneReply) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, task := range c.mapTasks {
-		if task.id == args.TaskId {
-			task.status = Done
-			c.mu.Unlock()
-			return nil
+	fmt.Printf("Reporting task done for id %v\n", args.TaskId)
+	if Map == args.TaskType {
+		for i := range c.mapTasks {
+			if c.mapTasks[i].id == args.TaskId {
+				if c.mapTasks[i].workerId != args.Workerid {
+					log.Print("Task was reassigned to a different worker")
+					c.mu.Unlock()
+					return nil
+				}
+				c.mapTasks[i].status = TaskStatus(Done)
+				c.nMap--
+				c.mu.Unlock()
+				return nil
+			}
+		}
+	} else if Reduce == args.TaskType {
+		for i := range c.reduceTasks {
+			if c.reduceTasks[i].id == args.TaskId {
+				if c.reduceTasks[i].workerId != args.Workerid {
+					log.Print("Task was reassigned to a different worker")
+					c.mu.Unlock()
+					return nil
+				}
+				c.reduceTasks[i].status = TaskStatus(Done)
+				c.nReduce--
+				c.mu.Unlock()
+				return nil
+			}
 		}
 	}
 
+	c.mu.Unlock()
 	return nil
 
 }
@@ -112,6 +158,7 @@ func (c *Coordinator) waitForTask(task *Task) error {
 	if task.status == Running {
 		fmt.Println("Task not completed; Changing back the staus of task to not started")
 		task.status = Notstarted
+		task.workerId = -1
 	}
 	return nil
 
@@ -155,9 +202,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.mapTasks = make([]Task, 0, len(files))
 	c.reduceTasks = make([]Task, 0, nReduce)
 	c.nReduce = nReduce
+	c.nMap = len(files)
 	for i, f := range files {
-		task := Task{i, f, Map, Notstarted}
+		task := Task{i, f, Map, Notstarted, -1}
 		c.mapTasks = append(c.mapTasks, task)
+	}
+
+	for i := 0; i < nReduce; i++ {
+		task := Task{i, "", Reduce, Notstarted, -1}
+		c.reduceTasks = append(c.reduceTasks, task)
 	}
 	// Your code here.
 
