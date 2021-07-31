@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +27,7 @@ type TaskType int
 const (
 	Map TaskType = iota
 	Reduce
+	Wait
 	Exit
 )
 
@@ -57,7 +57,6 @@ type Coordinator struct {
 // the RPC argument and reply types are defined in rpc.go.
 //
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	fmt.Println("Inside Example")
 	reply.Y = args.X + 1
 	return nil
 }
@@ -69,7 +68,6 @@ func (c *Coordinator) GetTask(args *RequestTaskArgs, reply *RequestTaskReply) er
 	if c.nMap > 0 {
 		for i := range c.mapTasks {
 			if c.mapTasks[i].status == Notstarted {
-				fmt.Printf("Sending task id %v\n", c.mapTasks[i].id)
 				reply.File = c.mapTasks[i].file
 				reply.TaskType = Map
 				reply.TaskId = c.mapTasks[i].id
@@ -80,6 +78,9 @@ func (c *Coordinator) GetTask(args *RequestTaskArgs, reply *RequestTaskReply) er
 				return nil
 			}
 		}
+		c.mu.Unlock()
+		reply.TaskType = Wait
+		return nil
 	}
 	if c.nReduce > 0 {
 		for i := range c.reduceTasks {
@@ -93,6 +94,9 @@ func (c *Coordinator) GetTask(args *RequestTaskArgs, reply *RequestTaskReply) er
 				return nil
 			}
 		}
+		c.mu.Unlock()
+		reply.TaskType = Wait
+		return nil
 	}
 	reply.TaskId = -1
 	reply.TaskType = TaskType(Done)
@@ -111,7 +115,6 @@ func (c *Coordinator) GetNReduce(args *GetReduceCountArgs, reply *GetReduceCount
 //ReportTaskDone is used by workers to report that a task is done
 func (c *Coordinator) ReportTaskDone(args *ReportTaskDoneArgs, reply *ReportTaskDoneReply) error {
 	c.mu.Lock()
-	fmt.Printf("Reporting task done for id %v\n", args.TaskId)
 	if Map == args.TaskType {
 		for i := range c.mapTasks {
 			if c.mapTasks[i].id == args.TaskId {
@@ -156,7 +159,6 @@ func (c *Coordinator) waitForTask(task *Task) error {
 	defer c.mu.Unlock()
 
 	if task.status == Running {
-		fmt.Println("Task not completed; Changing back the staus of task to not started")
 		task.status = Notstarted
 		task.workerId = -1
 	}
@@ -185,10 +187,11 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
 
-	// Your code here.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	ret := (c.nMap == 0 && c.nReduce == 0)
 	return ret
 }
 
@@ -212,7 +215,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		task := Task{i, "", Reduce, Notstarted, -1}
 		c.reduceTasks = append(c.reduceTasks, task)
 	}
-	// Your code here.
+
+	err := os.RemoveAll(TempDir)
+	if err != nil {
+		log.Fatalf("Cannot remove temp directory %v\n", TempDir)
+	}
+
+	err = os.Mkdir(TempDir, 0755)
+	if err != nil {
+		log.Fatalf("Cannot create temp directory %v\n", TempDir)
+	}
 
 	c.server()
 	return &c

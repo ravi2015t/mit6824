@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 //
@@ -42,18 +43,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	nReduce := GetNReduce()
 
 	for {
-
+		time.Sleep(50 * time.Millisecond)
 		task := GetTask()
 
 		if task.TaskType == Map {
-			fmt.Printf("Got MAP task id %v  \n", task.TaskId)
 			mapTask(task, mapf, nReduce)
 			ReportTaskDone(task.TaskId, Map)
 		} else if task.TaskType == Reduce {
-			fmt.Printf("Got REDUCE task id %v \n", task.TaskId)
 			doReduce(reducef, task.TaskId)
 			ReportTaskDone(task.TaskId, Reduce)
-		} else {
+		} else if task.TaskType == Wait {
+			//Wait for tasks to be completed
+		} else if task.TaskType == TaskType(Done) {
 			return
 		}
 	}
